@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ant Simulation</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: sans-serif; font-size: 13px; background: #ddd; display: flex; flex-direction: column; align-items: center; padding: 10px; }
+h1 { font-size: 16px; margin-bottom: 8px; }
+#app { display: flex; gap: 10px; align-items: flex-start; }
+#main { display: flex; flex-direction: column; gap: 6px; }
+#values { display: flex; gap: 10px; }
+canvas { display: block; border: 2px inset #aaa; cursor: crosshair; }
+.canvas-label { font-size: 11px; font-weight: bold; text-align: center; margin-bottom: 2px; color: #333; }
+#controls { background: #ccc; border: 2px inset #aaa; padding: 6px; width: 260px; }
+.tabs { display: flex; gap: 2px; margin-bottom: 6px; }
+.tab-btn { flex: 1; padding: 3px; font-size: 12px; cursor: pointer; background: #bbb; border: 1px solid #999; }
+.tab-btn.active { background: #ddd; font-weight: bold; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.control-row { display: flex; flex-direction: column; margin-bottom: 6px; }
+.control-row label { font-size: 11px; margin-bottom: 2px; display: flex; justify-content: space-between; }
+.control-row input[type=range] { width: 100%; }
+.btn-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
+.radio-row { display: flex; gap: 10px; align-items: center; font-size: 12px; margin-bottom: 6px; }
+#status { font-size: 11px; color: #333; }
+#tooltip { position: fixed; background: rgba(0,0,0,0.75); color: #fff; font-size: 11px; padding: 3px 6px; border-radius: 3px; pointer-events: none; display: none; z-index: 100; }
+</style>
+</head>
+<body>
+<h1>Ant Simulation — TD(&lambda;) Reinforcement Learning</h1>
+<div id="app">
+  <div id="main">
+    <div class="canvas-label">Ant Grid</div>
+    <canvas id="antCanvas" width="500" height="500"></canvas>
+    <div id="status">Steps: <span id="stepCount">0</span></div>
+    <div id="values">
+      <div>
+        <div class="canvas-label">Looking for Sugar (searching=true)</div>
+        <canvas id="searchingCanvas" width="250" height="250"></canvas>
+      </div>
+      <div>
+        <div class="canvas-label">Heading Home (carrying=true)</div>
+        <canvas id="carryingCanvas" width="250" height="250"></canvas>
+      </div>
+    </div>
+  </div>
+  <div id="controls">
+    <div class="tabs">
+      <button class="tab-btn active" onclick="showTab('basics')">Basics</button>
+      <button class="tab-btn" onclick="showTab('rewards')">Rewards</button>
+      <button class="tab-btn" onclick="showTab('learning')">Learning</button>
+    </div>
+
+    <div id="tab-basics" class="tab-panel active">
+      <div class="btn-row">
+        <button onclick="env.reset(); render()">Reset Ants</button>
+      </div>
+      <div class="radio-row">
+        <span>Click moves:</span>
+        <label><input type="radio" name="clickMode" value="sugar" checked> Sugar</label>
+        <label><input type="radio" name="clickMode" value="home"> Home</label>
+      </div>
+      <div class="control-row">
+        <label>Ant Count <output id="out-antCount">10</output></label>
+        <input type="range" id="sl-antCount" min="1" max="100" value="10"
+          oninput="document.getElementById('out-antCount').value=this.value; env.setAntCount(+this.value)">
+      </div>
+      <div class="control-row">
+        <label>Speed (ms/step) <output id="out-speed">10</output></label>
+        <input type="range" id="sl-speed" min="3" max="300" value="10"
+          oninput="document.getElementById('out-speed').value=this.value; setSpeed(+this.value)">
+      </div>
+    </div>
+
+    <div id="tab-rewards" class="tab-panel">
+      <div class="control-row">
+        <label>Reward <output id="out-reward">25</output></label>
+        <input type="range" id="sl-reward" min="0" max="25" step="0.1" value="25"
+          oninput="document.getElementById('out-reward').value=(+this.value).toFixed(1); env.rewardFn.reward=+this.value">
+      </div>
+      <div class="control-row">
+        <label>Movement Cost <output id="out-punish">-0.05</output></label>
+        <input type="range" id="sl-punish" min="-0.35" max="0" step="0.001" value="-0.05"
+          oninput="document.getElementById('out-punish').value=(+this.value).toFixed(3); env.rewardFn.punishment=+this.value">
+      </div>
+    </div>
+
+    <div id="tab-learning" class="tab-panel">
+      <div class="control-row">
+        <label>Epsilon (exploration) <output id="out-epsilon">0.10</output></label>
+        <input type="range" id="sl-epsilon" min="0" max="1" step="0.01" value="0.1"
+          oninput="document.getElementById('out-epsilon').value=(+this.value).toFixed(2); env.policy.epsilon=+this.value">
+      </div>
+      <div class="control-row">
+        <label>Learning Rate (alpha) <output id="out-alpha">0.10</output></label>
+        <input type="range" id="sl-alpha" min="0" max="1" step="0.01" value="0.1"
+          oninput="document.getElementById('out-alpha').value=(+this.value).toFixed(2); env.config.alpha=+this.value">
+      </div>
+      <div class="control-row">
+        <label>Discount (gamma) <output id="out-gamma">0.90</output></label>
+        <input type="range" id="sl-gamma" min="0" max="1" step="0.01" value="0.9"
+          oninput="document.getElementById('out-gamma').value=(+this.value).toFixed(2); env.config.gamma=+this.value">
+      </div>
+      <div class="control-row">
+        <label>Lambda <output id="out-lambda">0.80</output></label>
+        <input type="range" id="sl-lambda" min="0" max="1" step="0.01" value="0.8"
+          oninput="document.getElementById('out-lambda').value=(+this.value).toFixed(2); env.config.lambda=+this.value">
+      </div>
+    </div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+// ─── Section 1: RL Core ───────────────────────────────────────────────────────
+
+class ValueTable {
+  constructor(defaultValue = 0.1) {
+    this.defaultValue = defaultValue;
+    this.map = new Map();
+  }
+  _key(state) { return `${state.x},${state.y}:${state.searching}`; }
+  getValue(state) {
+    const k = this._key(state);
+    return this.map.has(k) ? this.map.get(k) : this.defaultValue;
+  }
+  setValue(state, val) { this.map.set(this._key(state), val); }
+  getValueByKey(key) { return this.map.has(key) ? this.map.get(key) : this.defaultValue; }
+  setValueByKey(key, val) { this.map.set(key, val); }
+  reset() { this.map.clear(); }
+}
+
+// Actions: UP(0,1), DOWN(0,-1), LEFT(-1,0), RIGHT(1,0), NONE(0,0)
+// Note: y increases downward in canvas, but the Java code uses +1 for UP
+// We faithfully reproduce the Java deltas.
+const ACTIONS = [
+  { label: 'up',         dx:  0, dy:  1 },
+  { label: 'down',       dx:  0, dy: -1 },
+  { label: 'left',       dx: -1, dy:  0 },
+  { label: 'right',      dx:  1, dy:  0 },
+  { label: 'up-left',    dx: -1, dy:  1 },
+  { label: 'up-right',   dx:  1, dy:  1 },
+  { label: 'down-left',  dx: -1, dy: -1 },
+  { label: 'down-right', dx:  1, dy: -1 },
+  { label: 'none',       dx:  0, dy:  0 },
+];
+
+class AntState {
+  constructor(env, x, y, searching = false, rewardState = false) {
+    this.env = env;
+    this.x = x;
+    this.y = y;
+    this.searching = searching;
+    this.rewardState = rewardState;
+  }
+
+  hasSugar() { return !this.searching; }
+
+  // Returns array of valid {action, nextState} for this state
+  getActions() {
+    const result = [];
+    for (const a of ACTIONS.slice(0, 8)) { // UP, DOWN, LEFT, RIGHT + diagonals
+      const nx = this.x + a.dx;
+      const ny = this.y + a.dy;
+      if (this.env.isFree(nx, ny)) {
+        result.push(a);
+      }
+    }
+    if (result.length === 0) result.push(ACTIONS[8]); // NONE
+    return result;
+  }
+
+  // Transition: checks CURRENT position for reward logic
+  move(nx, ny) {
+    const next = new AntState(this.env, nx, ny, this.searching, false);
+
+    if (this.env.isHome(this.x, this.y)) {
+      next.searching = true;
+      if (this.hasSugar()) next.rewardState = true;
+    }
+
+    if (this.env.isSugar(this.x, this.y)) {
+      next.searching = false;
+      if (this.searching) next.rewardState = true;
+    }
+
+    return next;
+  }
+
+  applyAction(action) {
+    return this.move(this.x + action.dx, this.y + action.dy);
+  }
+
+  key() { return `${this.x},${this.y}:${this.searching}`; }
+}
+
+class EGreedyPolicy {
+  constructor(epsilon) {
+    this.epsilon = epsilon;
+  }
+
+  selectAction(state, valueTable) {
+    const actions = state.getActions();
+    if (Math.random() < this.epsilon) {
+      // Random
+      return actions[Math.floor(Math.random() * actions.length)];
+    }
+    // Greedy: pick action with highest value of resulting state
+    let best = null;
+    let bestVal = -Infinity;
+    for (const a of actions) {
+      const ns = state.applyAction(a);
+      const v = valueTable.getValue(ns);
+      if (v > bestVal) { bestVal = v; best = a; }
+    }
+    return best;
+  }
+}
+
+class TDLambdaEpisode {
+  constructor(startState, policy, valueTable, rewardFn, config) {
+    this.currentState = startState;
+    this.policy = policy;
+    this.valueTable = valueTable;
+    this.rewardFn = rewardFn;
+    this.config = config;    // { lambda, alpha, gamma }
+    this.traces = new Map(); // key -> eligibility trace
+  }
+
+  getCurrentState() { return this.currentState; }
+
+  step() {
+    const { lambda, alpha, gamma } = this.config;
+    const state = this.currentState;
+    const action = this.policy.selectAction(state, this.valueTable);
+    const nextState = state.applyAction(action);
+    const reward = this.rewardFn.getReward(nextState);
+
+    const vCurrent = this.valueTable.getValue(state);
+    const vNext = this.valueTable.getValue(nextState);
+    const delta = reward + gamma * vNext - vCurrent;
+
+    // Accumulating eligibility trace for current state
+    const curKey = state.key();
+    this.traces.set(curKey, (this.traces.get(curKey) || 0) + 1);
+
+    // Update all traced states
+    for (const [k, e] of this.traces) {
+      const oldVal = this.valueTable.getValueByKey(k);
+      this.valueTable.setValueByKey(k, oldVal + alpha * delta * e);
+      const newTrace = e * gamma * lambda;
+      if (newTrace < 1e-10) {
+        this.traces.delete(k);
+      } else {
+        this.traces.set(k, newTrace);
+      }
+    }
+
+    this.currentState = nextState;
+  }
+}
+
+// ─── Section 2: Environment ───────────────────────────────────────────────────
+
+class AntRewardFunction {
+  constructor(reward = 25.0, punishment = -0.05) {
+    this.reward = reward;
+    this.punishment = punishment;
+  }
+  getReward(state) {
+    return state.rewardState ? this.reward : this.punishment;
+  }
+}
+
+class AntAgent {
+  constructor(env, x, y, policy, valueTable, rewardFn, config) {
+    // searching=false by default (matches Java: new AntState(env, x, y) → searching=false)
+    const startState = new AntState(env, x, y, false, false);
+    this.episode = new TDLambdaEpisode(startState, policy, valueTable, rewardFn, config);
+    this.facingRight = false;
+  }
+
+  step() {
+    const prevX = this.episode.getCurrentState().x;
+    this.episode.step();
+    const nextX = this.episode.getCurrentState().x;
+    if (nextX > prevX) this.facingRight = true;
+    else if (nextX < prevX) this.facingRight = false;
+  }
+
+  getCurrentState() { return this.episode.getCurrentState(); }
+}
+
+class AntEnvironment {
+  constructor() {
+    this.width = 50;
+    this.height = 50;
+    this.homeX = 7;
+    this.homeY = 5;
+    this.sugarX = 22;
+    this.sugarY = 12;
+
+    this.config = { lambda: 0.8, alpha: 0.1, gamma: 0.9 };
+    this.valueTable = new ValueTable(0.1);
+    this.policy = new EGreedyPolicy(0.1);
+    this.rewardFn = new AntRewardFunction(25.0, -0.05);
+
+    this.ants = [];
+    this.totalSteps = 0;
+
+    for (let i = 0; i < 10; i++) this._addAnt();
+  }
+
+  _addAnt() {
+    this.ants.push(new AntAgent(
+      this, this.homeX, this.homeY,
+      this.policy, this.valueTable, this.rewardFn, this.config
+    ));
+  }
+
+  contains(x, y) { return x >= 0 && y >= 0 && x < this.width && y < this.height; }
+
+  isAnt(x, y) {
+    for (const ant of this.ants) {
+      const s = ant.getCurrentState();
+      if (s.x === x && s.y === y) return true;
+    }
+    return false;
+  }
+
+  isFree(x, y) { return this.contains(x, y) && !this.isAnt(x, y); }
+
+  isHome(x, y) { return x === this.homeX && y === this.homeY; }
+
+  isSugar(x, y) { return x === this.sugarX && y === this.sugarY; }
+
+  step() {
+    const snapshot = this.ants.slice();
+    for (const ant of snapshot) ant.step();
+    this.totalSteps++;
+  }
+
+  setAntCount(n) {
+    while (this.ants.length < n) this._addAnt();
+    while (this.ants.length > n) this.ants.pop();
+  }
+
+  setSugar(x, y) { this.sugarX = x; this.sugarY = y; }
+
+  setHome(x, y) { this.homeX = x; this.homeY = y; }
+
+  reset() {
+    this.valueTable.reset();
+    const count = this.ants.length;
+    this.ants = [];
+    this.totalSteps = 0;
+    for (let i = 0; i < count; i++) this._addAnt();
+  }
+}
+
+// ─── Section 3: Rendering ─────────────────────────────────────────────────────
+
+const ANT_SCALE = 10;   // 50×10 = 500px ant canvas
+const VALUE_SCALE = 5;  // 50×5  = 250px value canvases
+
+function valueColor(value) {
+  let brightness = 0;
+  const absVal = Math.abs(value);
+  if (absVal > 0.001) {
+    let a = Math.log(absVal);
+    a += 7;
+    brightness = Math.floor(a / 12 * 255);
+    if (brightness > 255) brightness = 255;
+    if (brightness < 0) brightness = 0;
+  }
+  if (value >= 0) return `rgb(0,${brightness},0)`;
+  return `rgb(${brightness},0,0)`;
+}
+
+function drawEmoji(ctx, emoji, cx, cy, fontSize, flipH = false) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (flipH) ctx.scale(-1, 1);
+  ctx.font = `${fontSize}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, 0, 0);
+  ctx.restore();
+}
+
+function cellCenter(x, y, scale) {
+  return [x * scale + scale / 2, y * scale + scale / 2];
+}
+
+function drawAntView(ctx, env) {
+  const w = env.width, h = env.height;
+  ctx.fillStyle = '#f2deb0';
+  ctx.fillRect(0, 0, w * ANT_SCALE, h * ANT_SCALE);
+
+  const BIG = ANT_SCALE * 2.5;
+  drawEmoji(ctx, '🏠', ...cellCenter(env.homeX, env.homeY, ANT_SCALE), BIG);
+  drawEmoji(ctx, '🍰', ...cellCenter(env.sugarX, env.sugarY, ANT_SCALE), BIG);
+
+  for (const ant of env.ants) {
+    const s = ant.getCurrentState();
+    drawEmoji(ctx, '🐜', ...cellCenter(s.x, s.y, ANT_SCALE), ANT_SCALE - 1, ant.facingRight);
+  }
+}
+
+function drawValueView(ctx, env, searching) {
+  const w = env.width, h = env.height;
+  const dummy = new AntState(env, 0, 0, searching, false);
+
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      dummy.x = x; dummy.y = y;
+      const val = env.valueTable.getValue(dummy);
+      ctx.fillStyle = valueColor(val);
+      ctx.fillRect(x * VALUE_SCALE, y * VALUE_SCALE, VALUE_SCALE, VALUE_SCALE);
+    }
+  }
+}
+
+// ─── Section 4: Controls / Tabs ──────────────────────────────────────────────
+
+function showTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ─── Section 5: Main / Animation Loop ────────────────────────────────────────
+
+const env = new AntEnvironment();
+
+const antCanvas = document.getElementById('antCanvas');
+const searchCanvas = document.getElementById('searchingCanvas');
+const carryCanvas = document.getElementById('carryingCanvas');
+const antCtx = antCanvas.getContext('2d');
+const searchCtx = searchCanvas.getContext('2d');
+const carryCtx = carryCanvas.getContext('2d');
+
+function render() {
+  drawAntView(antCtx, env);
+  drawValueView(searchCtx, env, true);   // searching=true: looking for sugar
+  drawValueView(carryCtx, env, false);   // searching=false: carrying, heading home
+  document.getElementById('stepCount').textContent = env.totalSteps;
+}
+
+let intervalId = setInterval(() => { env.step(); render(); }, 10);
+
+function setSpeed(ms) {
+  clearInterval(intervalId);
+  intervalId = setInterval(() => { env.step(); render(); }, ms);
+}
+
+// Canvas click: move sugar or home
+antCanvas.addEventListener('click', e => {
+  const rect = antCanvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / ANT_SCALE);
+  const y = Math.floor((e.clientY - rect.top) / ANT_SCALE);
+  if (!env.contains(x, y)) return;
+  const mode = document.querySelector('input[name="clickMode"]:checked').value;
+  if (mode === 'sugar') env.setSugar(x, y);
+  else env.setHome(x, y);
+});
+
+// Tooltip on value canvases
+function addTooltip(canvas, searching) {
+  const tooltip = document.getElementById('tooltip');
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / SCALE);
+    const y = Math.floor((e.clientY - rect.top) / SCALE);
+    if (!env.contains(x, y)) { tooltip.style.display = 'none'; return; }
+    const dummy = new AntState(env, x, y, searching, false);
+    const val = env.valueTable.getValue(dummy);
+    tooltip.textContent = `(${x}, ${y}): ${val.toFixed(4)}`;
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX + 12) + 'px';
+    tooltip.style.top = (e.clientY + 12) + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+}
+addTooltip(searchCanvas, true);
+addTooltip(carryCanvas, false);
+
+render();
+</script>
+</body>
+</html>
