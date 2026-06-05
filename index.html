@@ -59,6 +59,11 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
         <button onclick="env.reset(); render()">Reset Ants</button>
       </div>
       <div class="radio-row">
+        <span>Value fn:</span>
+        <label><input type="radio" name="valueFnMode" value="table" checked> Table</label>
+        <label><input type="radio" name="valueFnMode" value="neural"> Neural Net</label>
+      </div>
+      <div class="radio-row">
         <span>Click moves:</span>
         <label><input type="radio" name="clickMode" value="sugar" checked> Sugar</label>
         <label><input type="radio" name="clickMode" value="home"> Home</label>
@@ -131,6 +136,128 @@ class ValueTable {
   getValueByKey(key) { return this.map.has(key) ? this.map.get(key) : this.defaultValue; }
   setValueByKey(key, val) { this.map.set(key, val); }
   reset() { this.map.clear(); }
+}
+
+// Single-hidden-layer net: inputSize → hiddenSize → 1 (tanh hidden, linear output).
+// Pure JS — no framework, no tensor allocation, no GC pressure per call.
+class MiniNet {
+  constructor(hiddenSize = 16, inputSize = 2) {
+    this.h  = hiddenSize;
+    this.ni = inputSize;
+    this._init();
+  }
+
+  _rand(n, scale) {
+    const a = new Float64Array(n);
+    for (let i = 0; i < n; i++) a[i] = (Math.random() * 2 - 1) * scale;
+    return a;
+  }
+
+  _init() {
+    const { h, ni } = this;
+    this.W1 = this._rand(ni * h, Math.sqrt(2 / ni));  // ni inputs → h hidden
+    this.b1 = new Float64Array(h);
+    this.W2 = this._rand(h,      Math.sqrt(2 / h));   // h hidden → 1 output
+    this.b2 = 0;
+    this._a1 = new Float64Array(h); // reusable forward-pass buffer
+  }
+
+  predict(x) {
+    const { h, ni, W1, b1, W2, b2, _a1 } = this;
+    for (let j = 0; j < h; j++) {
+      let z = b1[j];
+      for (let i = 0; i < ni; i++) z += x[i] * W1[i * h + j];
+      _a1[j] = Math.tanh(z);
+    }
+    let out = b2;
+    for (let j = 0; j < h; j++) out += _a1[j] * W2[j];
+    return out;
+  }
+
+  // One SGD step: minimise 0.5*(predict(x) - target)^2
+  update(x, target, lr) {
+    const { h, ni, W1, b1, W2, _a1 } = this;
+    // Forward (fills _a1)
+    const out = this.predict(x);
+    const err = target - out; // -(dL/dout)
+    // Output layer
+    for (let j = 0; j < h; j++) W2[j] += lr * err * _a1[j];
+    this.b2 += lr * err;
+    // Hidden layer
+    for (let j = 0; j < h; j++) {
+      const d = err * W2[j] * (1 - _a1[j] * _a1[j]); // tanh'
+      for (let i = 0; i < ni; i++) W1[i * h + j] += lr * d * x[i];
+      b1[j] += lr * d;
+    }
+  }
+
+  reset() { this._init(); }
+}
+
+class NeuralValueTable {
+  // Two independent MiniNets — one per phase — so gradients never cross-contaminate.
+  // Inputs are polar coords relative to the phase's goal: [r, sin(θ), cos(θ)]
+  //   searchingNet: goal = sugar  (ant is hunting for sugar)
+  //   carryingNet:  goal = home   (ant is carrying sugar home)
+  constructor(env) {
+    this.env = env;
+    this.lr  = 0.05;
+    this.searchingNet = new MiniNet(16, 3);
+    this.carryingNet  = new MiniNet(16, 3);
+  }
+
+  // Polar coords centered on the goal for this phase.
+  // Small r = close to goal = expected high value; lets the net learn a simple f(r).
+  _encode(x, y, searching) {
+    const refX = searching ? this.env.sugarX : this.env.homeX;
+    const refY = searching ? this.env.sugarY : this.env.homeY;
+    const dx = x - refX, dy = y - refY;
+    const r = Math.sqrt(dx*dx + dy*dy) / 70;
+    if (dx === 0 && dy === 0) return [0, 0, 0];
+    const a = Math.atan2(dy, dx);
+    return [r, Math.sin(a), Math.cos(a)];
+  }
+
+  _parseKey(key) {
+    const c = key.indexOf(':');
+    const [x, y] = key.slice(0, c).split(',').map(Number);
+    return [x, y, key.slice(c + 1) === 'true'];
+  }
+
+  _net(searching) { return searching ? this.searchingNet : this.carryingNet; }
+
+  getValue(state) {
+    return this._net(state.searching).predict(this._encode(state.x, state.y, state.searching));
+  }
+
+  getValueByKey(key) {
+    const [x, y, s] = this._parseKey(key);
+    return this._net(s).predict(this._encode(x, y, s));
+  }
+
+  setValue(state, val) {
+    this._net(state.searching).update(this._encode(state.x, state.y, state.searching), val, this.lr);
+  }
+
+  setValueByKey(key, val) {
+    const [x, y, s] = this._parseKey(key);
+    this._net(s).update(this._encode(x, y, s), val, this.lr);
+  }
+
+  getBatchValues(searching) {
+    const net = this._net(searching);
+    const out = new Float64Array(2500);
+    let i = 0;
+    for (let x = 0; x < 50; x++)
+      for (let y = 0; y < 50; y++)
+        out[i++] = net.predict(this._encode(x, y, searching));
+    return out;
+  }
+
+  reset() {
+    this.searchingNet.reset();
+    this.carryingNet.reset();
+  }
 }
 
 // Actions: UP(0,1), DOWN(0,-1), LEFT(-1,0), RIGHT(1,0), NONE(0,0)
@@ -208,15 +335,11 @@ class EGreedyPolicy {
       // Random
       return actions[Math.floor(Math.random() * actions.length)];
     }
-    // Greedy: pick action with highest value of resulting state
-    let best = null;
-    let bestVal = -Infinity;
-    for (const a of actions) {
-      const ns = state.applyAction(a);
-      const v = valueTable.getValue(ns);
-      if (v > bestVal) { bestVal = v; best = a; }
-    }
-    return best;
+    // Greedy: pick action with highest value of resulting state; break ties randomly
+    const vals = actions.map(a => valueTable.getValue(state.applyAction(a)));
+    const bestVal = Math.max(...vals);
+    const tied = actions.filter((_, i) => Math.abs(vals[i] - bestVal) < 1e-10);
+    return tied[Math.floor(Math.random() * tied.length)];
   }
 }
 
@@ -227,7 +350,7 @@ class TDLambdaEpisode {
     this.valueTable = valueTable;
     this.rewardFn = rewardFn;
     this.config = config;    // { lambda, alpha, gamma }
-    this.traces = new Map(); // key -> eligibility trace
+    this.traces = new Map(); // state key -> eligibility scalar
   }
 
   getCurrentState() { return this.currentState; }
@@ -240,23 +363,21 @@ class TDLambdaEpisode {
     const reward = this.rewardFn.getReward(nextState);
 
     const vCurrent = this.valueTable.getValue(state);
-    const vNext = this.valueTable.getValue(nextState);
-    const delta = reward + gamma * vNext - vCurrent;
+    const vNext    = this.valueTable.getValue(nextState);
+    const delta    = reward + gamma * vNext - vCurrent;
 
-    // Accumulating eligibility trace for current state
+    // TD(λ) with eligibility traces — identical for table and neural net.
+    // The value table's setValueByKey is the only hook: table stores directly,
+    // NeuralValueTable queues a supervised target for the next batch update.
     const curKey = state.key();
     this.traces.set(curKey, (this.traces.get(curKey) || 0) + 1);
 
-    // Update all traced states
     for (const [k, e] of this.traces) {
       const oldVal = this.valueTable.getValueByKey(k);
       this.valueTable.setValueByKey(k, oldVal + alpha * delta * e);
       const newTrace = e * gamma * lambda;
-      if (newTrace < 1e-10) {
-        this.traces.delete(k);
-      } else {
-        this.traces.set(k, newTrace);
-      }
+      if (newTrace < 1e-10) this.traces.delete(k);
+      else                  this.traces.set(k, newTrace);
     }
 
     this.currentState = nextState;
@@ -277,8 +398,8 @@ class AntRewardFunction {
 
 class AntAgent {
   constructor(env, x, y, policy, valueTable, rewardFn, config) {
-    // searching=false by default (matches Java: new AntState(env, x, y) → searching=false)
-    const startState = new AntState(env, x, y, false, false);
+    // searching=true: ants start looking for sugar (not falsely carrying it)
+    const startState = new AntState(env, x, y, true, false);
     this.episode = new TDLambdaEpisode(startState, policy, valueTable, rewardFn, config);
     this.facingRight = false;
   }
@@ -304,7 +425,7 @@ class AntEnvironment {
     this.sugarY = 12;
 
     this.config = { lambda: 0.8, alpha: 0.1, gamma: 0.9 };
-    this.valueTable = new ValueTable(0.1);
+    this.valueTable = new ValueTable(0.0);
     this.policy = new EGreedyPolicy(0.1);
     this.rewardFn = new AntRewardFunction(25.0, -0.05);
 
@@ -340,6 +461,8 @@ class AntEnvironment {
   step() {
     const snapshot = this.ants.slice();
     for (const ant of snapshot) ant.step();
+    // Flush batched NN targets (no-op for ValueTable)
+    if (typeof this.valueTable.flushUpdates === 'function') this.valueTable.flushUpdates();
     this.totalSteps++;
   }
 
@@ -406,20 +529,31 @@ function drawAntView(ctx, env) {
 
   for (const ant of env.ants) {
     const s = ant.getCurrentState();
-    drawEmoji(ctx, '🐜', ...cellCenter(s.x, s.y, ANT_SCALE), ANT_SCALE - 1, ant.facingRight);
+    const [cx, cy] = cellCenter(s.x, s.y, ANT_SCALE);
+    drawEmoji(ctx, '🐜', cx, cy, ANT_SCALE - 1, ant.facingRight);
+    if (!s.searching) drawEmoji(ctx, '🍰', cx, cy - ANT_SCALE * 0.9, ANT_SCALE * 0.6);
   }
 }
 
 function drawValueView(ctx, env, searching) {
   const w = env.width, h = env.height;
-  const dummy = new AntState(env, 0, 0, searching, false);
-
-  for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) {
-      dummy.x = x; dummy.y = y;
-      const val = env.valueTable.getValue(dummy);
-      ctx.fillStyle = valueColor(val);
-      ctx.fillRect(x * VALUE_SCALE, y * VALUE_SCALE, VALUE_SCALE, VALUE_SCALE);
+  if (typeof env.valueTable.getBatchValues === 'function') {
+    const values = env.valueTable.getBatchValues(searching);
+    let i = 0;
+    for (let x = 0; x < w; x++)
+      for (let y = 0; y < h; y++) {
+        ctx.fillStyle = valueColor(values[i++]);
+        ctx.fillRect(x * VALUE_SCALE, y * VALUE_SCALE, VALUE_SCALE, VALUE_SCALE);
+      }
+  } else {
+    const dummy = new AntState(env, 0, 0, searching, false);
+    for (let x = 0; x < w; x++) {
+      for (let y = 0; y < h; y++) {
+        dummy.x = x; dummy.y = y;
+        const val = env.valueTable.getValue(dummy);
+        ctx.fillStyle = valueColor(val);
+        ctx.fillRect(x * VALUE_SCALE, y * VALUE_SCALE, VALUE_SCALE, VALUE_SCALE);
+      }
     }
   }
 }
@@ -436,6 +570,17 @@ function showTab(name) {
 // ─── Section 5: Main / Animation Loop ────────────────────────────────────────
 
 const env = new AntEnvironment();
+
+function setValueFnMode(mode) {
+  env.valueTable = mode === 'neural' ? new NeuralValueTable(env) : new ValueTable(0.0);
+  env.totalSteps = 0;
+  const count = env.ants.length;
+  env.ants = [];
+  for (let i = 0; i < count; i++) env._addAnt();
+}
+document.querySelectorAll('input[name="valueFnMode"]').forEach(r =>
+  r.addEventListener('change', e => { if (e.target.checked) setValueFnMode(e.target.value); })
+);
 
 const antCanvas = document.getElementById('antCanvas');
 const searchCanvas = document.getElementById('searchingCanvas');
@@ -474,8 +619,8 @@ function addTooltip(canvas, searching) {
   const tooltip = document.getElementById('tooltip');
   canvas.addEventListener('mousemove', e => {
     const rect = canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / SCALE);
-    const y = Math.floor((e.clientY - rect.top) / SCALE);
+    const x = Math.floor((e.clientX - rect.left) / VALUE_SCALE);
+    const y = Math.floor((e.clientY - rect.top) / VALUE_SCALE);
     if (!env.contains(x, y)) { tooltip.style.display = 'none'; return; }
     const dummy = new AntState(env, x, y, searching, false);
     const val = env.valueTable.getValue(dummy);
