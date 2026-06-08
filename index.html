@@ -27,6 +27,16 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
 .radio-row { display: flex; gap: 10px; align-items: center; font-size: 12px; margin-bottom: 6px; }
 #status { font-size: 11px; color: #333; }
 #tooltip { position: fixed; background: rgba(0,0,0,0.75); color: #fff; font-size: 11px; padding: 3px 6px; border-radius: 3px; pointer-events: none; display: none; z-index: 100; }
+#sidebar { display: flex; flex-direction: column; gap: 10px; }
+#howto { background: #ccc; border: 2px inset #aaa; padding: 8px; width: 260px; font-size: 11px; line-height: 1.5; }
+
+@media (max-width: 640px) {
+  #app { flex-direction: column; align-items: stretch; width: 100%; }
+  #antCanvas { width: 100%; aspect-ratio: 1 / 1; }
+  #values > div { flex: 1; min-width: 0; }
+  #values canvas { width: 100%; aspect-ratio: 1 / 1; }
+  #controls, #howto { width: 100%; }
+}
 </style>
 </head>
 <body>
@@ -46,7 +56,7 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
       </div>
     </div>
   </div>
-  <div style="display:flex;flex-direction:column;gap:10px">
+  <div id="sidebar">
   <div id="controls">
     <div class="tabs">
       <button class="tab-btn active" onclick="showTab('basics')">Basics</button>
@@ -70,8 +80,8 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
         <label><input type="radio" name="clickMode" value="home"> Home 🏠</label>
       </div>
       <div class="control-row">
-        <label>Ant Count <output id="out-antCount">10</output></label>
-        <input type="range" id="sl-antCount" min="1" max="100" value="10"
+        <label>Ant Count <output id="out-antCount">25</output></label>
+        <input type="range" id="sl-antCount" min="1" max="100" value="25"
           oninput="document.getElementById('out-antCount').value=this.value; env.setAntCount(+this.value)">
       </div>
       <div class="control-row">
@@ -125,7 +135,7 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
       </div>
     </div>
   </div>
-  <div id="howto" style="background:#ccc;border:2px inset #aaa;padding:8px;width:260px;font-size:11px;line-height:1.5">
+  <div id="howto">
     <strong style="font-size:12px">How this works:</strong>
     <p style="margin-top:5px">The ants start out just wandering around the board. If they find the sugar, they receive a reward. That reward is echoed back along the path they took, updating the value of those locations. By favoring locations with higher values, the ants will be more likely to move towards the goal (and so earn more rewards and reinforce the path). </p>
     <p style="margin-top:5px">The heat maps at the bottom of the screen display the currently value functions. Ants will be more likely to move towards the high value "green" locations.</p>
@@ -584,7 +594,7 @@ class AntEnvironment {
     this.ants = [];
     this.totalSteps = 0;
 
-    for (let i = 0; i < 10; i++) this._addAnt();
+    for (let i = 0; i < DEFAULT_ANT_COUNT; i++) this._addAnt();
   }
 
   _addAnt() {
@@ -721,7 +731,12 @@ function showTab(name) {
 
 // ─── Section 5: Main / Animation Loop ────────────────────────────────────────
 
+const DEFAULT_ANT_COUNT = 25;
 const env = new AntEnvironment();
+
+// Sync ant count slider/display to the const
+document.getElementById('sl-antCount').value = DEFAULT_ANT_COUNT;
+document.getElementById('out-antCount').value = DEFAULT_ANT_COUNT;
 
 function setValueFnMode(mode) {
   if (mode === 'neural')           env.valueTable = new NeuralValueTable(env);
