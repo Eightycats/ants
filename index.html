@@ -143,7 +143,7 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
     <p style="margin-top:5px">Use the controls to play with the number of ants, their speed, the size of their reward, and the various TD(λ) learning factors. For example, by adjusting <strong>Exploration vs. Exploitation</strong>, you can control whether the ants are locked in to the best path they have found so far vs. how much they explore to see if there is a better way..</p>
     <p style="margin-top:5px">It's interesting to note how the path to the sugar and the path back are not the same. The paths are avoiding each other so that the ants don't bump into each other too often. There is no rule telling them to do this. It's just an emergent behavior.</p>
   </div>
-  <div>By <a href="https://career.eightycats.com/">Matt Jensen</a></div>
+  <div style="text-align: right">By <a href="https://career.eightycats.com/">Matt Jensen</a></div>
 </div>
 <div id="tooltip"></div>
 
@@ -783,8 +783,10 @@ setSpeed(DEFAULT_INTERVAL);
 // Canvas click: move sugar or home
 antCanvas.addEventListener('click', e => {
   const rect = antCanvas.getBoundingClientRect();
-  const x = Math.floor((e.clientX - rect.left) / ANT_SCALE);
-  const y = Math.floor((e.clientY - rect.top) / ANT_SCALE);
+  const scaleX = antCanvas.width / rect.width;
+  const scaleY = antCanvas.height / rect.height;
+  const x = Math.floor((e.clientX - rect.left) * scaleX / ANT_SCALE);
+  const y = Math.floor((e.clientY - rect.top) * scaleY / ANT_SCALE);
   if (!env.contains(x, y)) return;
   const mode = document.querySelector('input[name="clickMode"]:checked').value;
   if (mode === 'sugar') env.setSugar(x, y);
