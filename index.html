@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ant Simulation</title>
+<title>Ant Learning Simulation</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: sans-serif; font-size: 13px; background: #ddd; display: flex; flex-direction: column; align-items: center; padding: 10px; }
@@ -30,23 +30,23 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
 </style>
 </head>
 <body>
-<h1>Ant Simulation — TD(&lambda;) Reinforcement Learning</h1>
+<h1>Ant Learning Demo</h1>
 <div id="app">
   <div id="main">
-    <div class="canvas-label">Ant Grid</div>
     <canvas id="antCanvas" width="500" height="500"></canvas>
     <div id="status">Steps: <span id="stepCount">0</span></div>
     <div id="values">
       <div>
-        <div class="canvas-label">Looking for Sugar (searching=true)</div>
+        <div class="canvas-label">Looking for Sugar</div>
         <canvas id="searchingCanvas" width="250" height="250"></canvas>
       </div>
       <div>
-        <div class="canvas-label">Heading Home (carrying=true)</div>
+        <div class="canvas-label">Heading Home</div>
         <canvas id="carryingCanvas" width="250" height="250"></canvas>
       </div>
     </div>
   </div>
+  <div style="display:flex;flex-direction:column;gap:10px">
   <div id="controls">
     <div class="tabs">
       <button class="tab-btn active" onclick="showTab('basics')">Basics</button>
@@ -59,15 +59,15 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
         <button onclick="env.reset(); render()">Reset Ants</button>
       </div>
       <div class="radio-row">
-        <span>Value fn:</span>
-        <label><input type="radio" name="valueFnMode" value="table" checked> Table</label>
-        <label><input type="radio" name="valueFnMode" value="tilecoding"> Tile Coding</label>
-        <label><input type="radio" name="valueFnMode" value="neural"> Neural Net</label>
+        <div>Value function:</div>
+        <label><input type="radio" name="valueFnMode" value="table" checked>Value Table</label>
+        <label><input type="radio" name="valueFnMode" value="tilecoding">Tile Encoding</label>
+        <label><input type="radio" name="valueFnMode" value="neural">Neural Net</label>
       </div>
       <div class="radio-row">
         <span>Click moves:</span>
-        <label><input type="radio" name="clickMode" value="sugar" checked> Sugar</label>
-        <label><input type="radio" name="clickMode" value="home"> Home</label>
+        <label><input type="radio" name="clickMode" value="sugar" checked> Sugar 🍰</label>
+        <label><input type="radio" name="clickMode" value="home"> Home 🏠</label>
       </div>
       <div class="control-row">
         <label>Ant Count <output id="out-antCount">10</output></label>
@@ -75,7 +75,7 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
           oninput="document.getElementById('out-antCount').value=this.value; env.setAntCount(+this.value)">
       </div>
       <div class="control-row">
-        <label>Speed (ms/step) <output id="out-speed">10</output></label>
+        <label>Speed (ms/step) <output id="out-speed"></output></label>
         <div style="display:flex;align-items:center;gap:6px">
           <span>Fast</span>
           <input type="range" id="sl-speed" min="3" max="300" value="10" style="flex:1"
@@ -100,9 +100,13 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
 
     <div id="tab-learning" class="tab-panel">
       <div class="control-row">
-        <label>Epsilon (exploration) <output id="out-epsilon">0.10</output></label>
+        <label>Exploration vs. Exploitation (epsilon) <output id="out-epsilon">0.10</output></label>
+        <div style="display:flex;align-items:center;gap:6px">
+        <span>Greedy</span>
         <input type="range" id="sl-epsilon" min="0" max="1" step="0.01" value="0.1"
           oninput="document.getElementById('out-epsilon').value=(+this.value).toFixed(2); env.policy.epsilon=+this.value">
+        <span>Random</span>          
+        </div>
       </div>
       <div class="control-row">
         <label>Learning Rate (alpha) <output id="out-alpha">0.10</output></label>
@@ -121,6 +125,15 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
       </div>
     </div>
   </div>
+  <div id="howto" style="background:#ccc;border:2px inset #aaa;padding:8px;width:260px;font-size:11px;line-height:1.5">
+    <strong style="font-size:12px">How this works:</strong>
+    <p style="margin-top:5px">The ants start out just wandering around the board. If they find the sugar, they receive a reward. That reward is echoed back along the path they took, updating the value of those locations. By favoring locations with higher values, the ants will be more likely to move towards the goal (and so earn more rewards and reinforce the path). </p>
+    <p style="margin-top:5px">The heat maps at the bottom of the screen display the currently value functions. Ants will be more likely to move towards the high value "green" locations.</p>
+    <p style="margin-top:5px">Once the ants have converged on a path to the goal, try clicking on the board to move the Sugar (or the Home). The ant movement and their value maps should update as they "forget" the old location and learn the path to the new one.</p>
+    <p style="margin-top:5px">Use the controls to play with the number of ants, their speed, the size of their reward, and the various TD(λ) learning factors. For example, by adjusting <strong>Exploration vs. Exploitation</strong>, you can control whether the ants are locked in to the best path they have found so far vs. how much they explore to see if there is a better way..</p>
+    <p style="margin-top:5px">It's interesting to note how the path to the sugar and the path back are not the same. The paths are avoiding each other so that the ants don't bump into each other too often. There is no rule telling them to do this. It's just an emergent behavior.</p>
+  </div>
+  <div>By <a href="https://career.eightycats.com/">Matt Jensen</a></div>
 </div>
 <div id="tooltip"></div>
 
@@ -737,12 +750,20 @@ function render() {
   document.getElementById('stepCount').textContent = env.totalSteps;
 }
 
-let intervalId = setInterval(() => { env.step(); render(); }, 10);
+const DEFAULT_INTERVAL = 50;
+const speedSlider = document.getElementById("sl-speed");
+const speedOutput = document.getElementById("out-speed");
+
+let intervalId = setInterval(() => { env.step(); render(); }, DEFAULT_INTERVAL);
 
 function setSpeed(ms) {
   clearInterval(intervalId);
   intervalId = setInterval(() => { env.step(); render(); }, ms);
 }
+
+speedSlider.value = DEFAULT_INTERVAL;
+speedOutput.value = DEFAULT_INTERVAL;
+setSpeed(DEFAULT_INTERVAL);
 
 // Canvas click: move sugar or home
 antCanvas.addEventListener('click', e => {
