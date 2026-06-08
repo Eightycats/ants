@@ -61,6 +61,7 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
       <div class="radio-row">
         <span>Value fn:</span>
         <label><input type="radio" name="valueFnMode" value="table" checked> Table</label>
+        <label><input type="radio" name="valueFnMode" value="tilecoding"> Tile Coding</label>
         <label><input type="radio" name="valueFnMode" value="neural"> Neural Net</label>
       </div>
       <div class="radio-row">
@@ -75,8 +76,12 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
       </div>
       <div class="control-row">
         <label>Speed (ms/step) <output id="out-speed">10</output></label>
-        <input type="range" id="sl-speed" min="3" max="300" value="10"
-          oninput="document.getElementById('out-speed').value=this.value; setSpeed(+this.value)">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span>Fast</span>
+          <input type="range" id="sl-speed" min="3" max="300" value="10" style="flex:1"
+            oninput="document.getElementById('out-speed').value=this.value; setSpeed(+this.value)">
+          <span>Slow</span>
+        </div>
       </div>
     </div>
 
@@ -102,7 +107,7 @@ button { padding: 3px 8px; font-size: 12px; cursor: pointer; }
       <div class="control-row">
         <label>Learning Rate (alpha) <output id="out-alpha">0.10</output></label>
         <input type="range" id="sl-alpha" min="0" max="1" step="0.01" value="0.1"
-          oninput="document.getElementById('out-alpha').value=(+this.value).toFixed(2); env.config.alpha=+this.value">
+          oninput="document.getElementById('out-alpha').value=(+this.value).toFixed(2); env.config.alpha=+this.value; if(env.valueTable.lr!==undefined) env.valueTable.lr=+this.value">
       </div>
       <div class="control-row">
         <label>Discount (gamma) <output id="out-gamma">0.90</output></label>
@@ -138,12 +143,11 @@ class ValueTable {
   reset() { this.map.clear(); }
 }
 
-// Single-hidden-layer net: inputSize → hiddenSize → 1 (tanh hidden, linear output).
-// Pure JS — no framework, no tensor allocation, no GC pressure per call.
+// Multi-layer net: [inputSize, ...hiddenSizes, 1], tanh hidden, linear output.
+// Pure JS — pre-allocated buffers, no GC pressure per call.
 class MiniNet {
-  constructor(hiddenSize = 16, inputSize = 2) {
-    this.h  = hiddenSize;
-    this.ni = inputSize;
+  constructor(hiddenSizes = [64, 64], inputSize = 2) {
+    this.layerSizes = [inputSize, ...hiddenSizes, 1];
     this._init();
   }
 
@@ -154,40 +158,67 @@ class MiniNet {
   }
 
   _init() {
-    const { h, ni } = this;
-    this.W1 = this._rand(ni * h, Math.sqrt(2 / ni));  // ni inputs → h hidden
-    this.b1 = new Float64Array(h);
-    this.W2 = this._rand(h,      Math.sqrt(2 / h));   // h hidden → 1 output
-    this.b2 = 0;
-    this._a1 = new Float64Array(h); // reusable forward-pass buffer
+    const ls = this.layerSizes;
+    this.W      = [];
+    this.b      = [];
+    this._a     = [];
+    this._delta = [];
+    for (let l = 0; l < ls.length - 1; l++) {
+      // Small init: no position on the grid gets a head-start
+      this.W.push(this._rand(ls[l] * ls[l+1], 0.1));
+      this.b.push(new Float64Array(ls[l+1]));
+      this._a.push(new Float64Array(ls[l+1]));
+      this._delta.push(new Float64Array(ls[l+1]));
+    }
   }
 
   predict(x) {
-    const { h, ni, W1, b1, W2, b2, _a1 } = this;
-    for (let j = 0; j < h; j++) {
-      let z = b1[j];
-      for (let i = 0; i < ni; i++) z += x[i] * W1[i * h + j];
-      _a1[j] = Math.tanh(z);
+    const ls = this.layerSizes;
+    let inp = x;
+    for (let l = 0; l < this.W.length; l++) {
+      const ni = ls[l], no = ls[l+1];
+      const W = this.W[l], b = this.b[l], a = this._a[l];
+      const isLast = l === this.W.length - 1;
+      for (let j = 0; j < no; j++) {
+        let z = b[j];
+        for (let i = 0; i < ni; i++) z += inp[i] * W[i * no + j];
+        a[j] = isLast ? z : Math.tanh(z);
+      }
+      inp = a;
     }
-    let out = b2;
-    for (let j = 0; j < h; j++) out += _a1[j] * W2[j];
-    return out;
+    return this._a[this._a.length - 1][0];
   }
 
   // One SGD step: minimise 0.5*(predict(x) - target)^2
   update(x, target, lr) {
-    const { h, ni, W1, b1, W2, _a1 } = this;
-    // Forward (fills _a1)
-    const out = this.predict(x);
-    const err = target - out; // -(dL/dout)
-    // Output layer
-    for (let j = 0; j < h; j++) W2[j] += lr * err * _a1[j];
-    this.b2 += lr * err;
-    // Hidden layer
-    for (let j = 0; j < h; j++) {
-      const d = err * W2[j] * (1 - _a1[j] * _a1[j]); // tanh'
-      for (let i = 0; i < ni; i++) W1[i * h + j] += lr * d * x[i];
-      b1[j] += lr * d;
+    const ls = this.layerSizes;
+    const nL = this.W.length;
+    const err = target - this.predict(x);
+
+    // Output layer delta
+    this._delta[nL - 1][0] = err;
+
+    // Backprop through hidden layers
+    for (let l = nL - 2; l >= 0; l--) {
+      const no = ls[l+1], nnext = ls[l+2];
+      const Wn = this.W[l+1], a = this._a[l], d = this._delta[l], dn = this._delta[l+1];
+      for (let j = 0; j < no; j++) {
+        let s = 0;
+        for (let k = 0; k < nnext; k++) s += dn[k] * Wn[j * nnext + k];
+        d[j] = s * (1 - a[j] * a[j]);
+      }
+    }
+
+    // Weight + bias updates
+    let inp = x;
+    for (let l = 0; l < nL; l++) {
+      const ni = ls[l], no = ls[l+1];
+      const W = this.W[l], b = this.b[l], d = this._delta[l];
+      for (let j = 0; j < no; j++) {
+        for (let i = 0; i < ni; i++) W[i * no + j] += lr * d[j] * inp[i];
+        b[j] += lr * d[j];
+      }
+      inp = this._a[l];
     }
   }
 
@@ -196,24 +227,32 @@ class MiniNet {
 
 class NeuralValueTable {
   // Two independent MiniNets — one per phase — so gradients never cross-contaminate.
-  // Inputs are polar coords relative to the phase's goal: [r, sin(θ), cos(θ)]
-  //   searchingNet: goal = sugar  (ant is hunting for sugar)
-  //   carryingNet:  goal = home   (ant is carrying sugar home)
+  // Inputs: polar coords [r, sin θ, cos θ] relative to the SOURCE for each phase.
+  // Training uses an experience replay buffer to break temporal correlations and
+  // stabilise the bootstrap targets (addresses the deadly triad for online TD + FA).
   constructor(env) {
     this.env = env;
     this.lr  = 0.05;
-    this.searchingNet = new MiniNet(16, 3);
-    this.carryingNet  = new MiniNet(16, 3);
+    this.replayCapacity = 5000;
+    this.batchSize = 32;
+    this.searchingBuffer = [];
+    this.carryingBuffer  = [];
+    this.searchingNet = new MiniNet([64, 64], 3);
+    this.carryingNet  = new MiniNet([64, 64], 3);
   }
 
-  // Polar coords centered on the goal for this phase.
-  // Small r = close to goal = expected high value; lets the net learn a simple f(r).
+  // Polar coords relative to the GOAL for this phase ("cheating" encoding).
+  // searching=true  → goal = sugar (ant is hunting sugar)
+  // searching=false → goal = home  (ant is carrying sugar home)
+  // This is "cheating" because the NN input encodes distance+direction to the
+  // goal directly, so the optimal value function is trivially r-shaped and
+  // the net learns dramatically faster than with source-relative coords.
   _encode(x, y, searching) {
     const refX = searching ? this.env.sugarX : this.env.homeX;
     const refY = searching ? this.env.sugarY : this.env.homeY;
     const dx = x - refX, dy = y - refY;
     const r = Math.sqrt(dx*dx + dy*dy) / 70;
-    if (dx === 0 && dy === 0) return [0, 0, 0];
+    if (dx === 0 && dy === 0) return [0, 0, 1];
     const a = Math.atan2(dy, dx);
     return [r, Math.sin(a), Math.cos(a)];
   }
@@ -225,6 +264,7 @@ class NeuralValueTable {
   }
 
   _net(searching) { return searching ? this.searchingNet : this.carryingNet; }
+  _buf(searching) { return searching ? this.searchingBuffer : this.carryingBuffer; }
 
   getValue(state) {
     return this._net(state.searching).predict(this._encode(state.x, state.y, state.searching));
@@ -235,13 +275,39 @@ class NeuralValueTable {
     return this._net(s).predict(this._encode(x, y, s));
   }
 
+  // Push TD target to replay buffer instead of training immediately.
+  // Immediate online training causes instability: each gradient step on the
+  // current state shifts predictions for nearby states, leading to oscillation.
   setValue(state, val) {
-    this._net(state.searching).update(this._encode(state.x, state.y, state.searching), val, this.lr);
+    this._pushReplay(state.x, state.y, state.searching, val);
   }
 
   setValueByKey(key, val) {
     const [x, y, s] = this._parseKey(key);
-    this._net(s).update(this._encode(x, y, s), val, this.lr);
+    this._pushReplay(x, y, s, val);
+  }
+
+  _pushReplay(x, y, searching, target) {
+    const buf = this._buf(searching);
+    buf.push({ x, y, searching, target });
+    if (buf.length > this.replayCapacity) buf.shift();
+  }
+
+  // Called once per environment tick. Samples a random mini-batch from each
+  // phase's buffer and runs one SGD update per sample. Random sampling breaks
+  // the temporal correlation of sequential ant trajectories.
+  flushUpdates() {
+    this._trainBatch(this.searchingBuffer, this.searchingNet);
+    this._trainBatch(this.carryingBuffer,  this.carryingNet);
+  }
+
+  _trainBatch(buf, net) {
+    if (buf.length === 0) return;
+    const n = Math.min(this.batchSize, buf.length);
+    for (let i = 0; i < n; i++) {
+      const { x, y, searching, target } = buf[Math.floor(Math.random() * buf.length)];
+      net.update(this._encode(x, y, searching), target, this.lr);
+    }
   }
 
   getBatchValues(searching) {
@@ -257,7 +323,80 @@ class NeuralValueTable {
   reset() {
     this.searchingNet.reset();
     this.carryingNet.reset();
+    this.searchingBuffer = [];
+    this.carryingBuffer  = [];
   }
+}
+
+class TileCodingValueTable {
+  // Linear function approximation over multiple offset tilings.
+  // Each state activates exactly one tile per tiling; value = defaultValue + Σ active weights.
+  // Only the numTilings weights for visited tiles are ever touched — unvisited tiles stay at
+  // defaultValue, giving the "unvisited = relatively valuable" behaviour the tabular method has.
+  constructor(tileSize = 5, numTilings = 3) {
+    this.tileSize   = tileSize;
+    this.numTilings = numTilings;
+    this.defaultValue = 0.1;
+    // Offsets spread across [0, tileSize) so adjacent tilings don't overlap systematically
+    this.offsets = [{ ox: 0, oy: 0 }, { ox: 2, oy: 3 }, { ox: 4, oy: 1 }].slice(0, numTilings);
+    // +1 gives an extra tile to absorb any offset overflow at the grid boundary
+    this.tilesPerDim    = Math.ceil(50 / tileSize) + 1;
+    this.tilesPerTiling = this.tilesPerDim * this.tilesPerDim;
+    // Two independent weight blocks: one per phase (searching / carrying)
+    this.weights = new Float64Array(2 * numTilings * this.tilesPerTiling);
+  }
+
+  _indices(x, y, searching) {
+    const base = searching ? 0 : this.numTilings * this.tilesPerTiling;
+    const out  = [];
+    for (let i = 0; i < this.numTilings; i++) {
+      const tx = Math.floor((x + this.offsets[i].ox) / this.tileSize);
+      const ty = Math.floor((y + this.offsets[i].oy) / this.tileSize);
+      out.push(base + i * this.tilesPerTiling + ty * this.tilesPerDim + tx);
+    }
+    return out;
+  }
+
+  _sum(idx) { let s = 0; for (const i of idx) s += this.weights[i]; return s; }
+
+  getValue(state) {
+    return this.defaultValue + this._sum(this._indices(state.x, state.y, state.searching));
+  }
+
+  getValueByKey(key) {
+    const [x, y, s] = this._parseKey(key);
+    return this.defaultValue + this._sum(this._indices(x, y, s));
+  }
+
+  setValue(state, val) {
+    const idx = this._indices(state.x, state.y, state.searching);
+    const err = val - (this.defaultValue + this._sum(idx));
+    for (const i of idx) this.weights[i] += err / this.numTilings;
+  }
+
+  setValueByKey(key, val) {
+    const [x, y, s] = this._parseKey(key);
+    const idx = this._indices(x, y, s);
+    const err = val - (this.defaultValue + this._sum(idx));
+    for (const i of idx) this.weights[i] += err / this.numTilings;
+  }
+
+  _parseKey(key) {
+    const c = key.indexOf(':');
+    const [x, y] = key.slice(0, c).split(',').map(Number);
+    return [x, y, key.slice(c + 1) === 'true'];
+  }
+
+  getBatchValues(searching) {
+    const out = new Float64Array(2500);
+    let i = 0;
+    for (let x = 0; x < 50; x++)
+      for (let y = 0; y < 50; y++)
+        out[i++] = this.defaultValue + this._sum(this._indices(x, y, searching));
+    return out;
+  }
+
+  reset() { this.weights.fill(0); }
 }
 
 // Actions: UP(0,1), DOWN(0,-1), LEFT(-1,0), RIGHT(1,0), NONE(0,0)
@@ -572,7 +711,9 @@ function showTab(name) {
 const env = new AntEnvironment();
 
 function setValueFnMode(mode) {
-  env.valueTable = mode === 'neural' ? new NeuralValueTable(env) : new ValueTable(0.0);
+  if (mode === 'neural')           env.valueTable = new NeuralValueTable(env);
+  else if (mode === 'tilecoding')  env.valueTable = new TileCodingValueTable();
+  else                             env.valueTable = new ValueTable(0.0);
   env.totalSteps = 0;
   const count = env.ants.length;
   env.ants = [];
